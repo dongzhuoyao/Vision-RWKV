@@ -23,8 +23,23 @@ T_MAX = 256
 
 
 from torch.utils.cpp_extension import load
-wkv_cuda = load(name="wkv", sources=["mmcls_custom/models/backbones/cuda/wkv_op.cpp", "mmcls_custom/models/backbones/cuda/wkv_cuda.cu"],
-                verbose=True, extra_cuda_cflags=['-res-usage', '--maxrregcount 60', '--use_fast_math', '-O3', '-Xptxas -O3', f'-DTmax={T_MAX}'])
+
+wkv_cuda = load(
+    name="wkv",
+    sources=[
+        "mmcls_custom/models/backbones/cuda/wkv_op.cpp",
+        "mmcls_custom/models/backbones/cuda/wkv_cuda.cu",
+    ],
+    verbose=True,
+    extra_cuda_cflags=[
+        "-res-usage",
+        "--maxrregcount 60",
+        "--use_fast_math",
+        "-O3",
+        "-Xptxas -O3",
+        f"-DTmax={T_MAX}",
+    ],
+)
 
 
 class WKV(torch.autograd.Function):
@@ -36,14 +51,14 @@ class WKV(torch.autograd.Function):
         assert T <= T_MAX
         assert B * C % min(C, 1024) == 0
 
-        half_mode = (w.dtype == torch.half)
-        bf_mode = (w.dtype == torch.bfloat16)
+        half_mode = w.dtype == torch.half
+        bf_mode = w.dtype == torch.bfloat16
         ctx.save_for_backward(w, u, k, v)
         w = w.float().contiguous()
         u = u.float().contiguous()
         k = k.float().contiguous()
         v = v.float().contiguous()
-        y = torch.empty((B, T, C), device='cuda', memory_format=torch.contiguous_format)
+        y = torch.empty((B, T, C), device="cuda", memory_format=torch.contiguous_format)
         wkv_cuda.forward(B, T, C, w, u, k, v, y)
         if half_mode:
             y = y.half()
@@ -59,19 +74,26 @@ class WKV(torch.autograd.Function):
         assert T <= T_MAX
         assert B * C % min(C, 1024) == 0
         w, u, k, v = ctx.saved_tensors
-        gw = torch.zeros((B, C), device='cuda').contiguous()
-        gu = torch.zeros((B, C), device='cuda').contiguous()
-        gk = torch.zeros((B, T, C), device='cuda').contiguous()
-        gv = torch.zeros((B, T, C), device='cuda').contiguous()
-        half_mode = (w.dtype == torch.half)
-        bf_mode = (w.dtype == torch.bfloat16)
-        wkv_cuda.backward(B, T, C,
-                          w.float().contiguous(),
-                          u.float().contiguous(),
-                          k.float().contiguous(),
-                          v.float().contiguous(),
-                          gy.float().contiguous(),
-                          gw, gu, gk, gv)
+        gw = torch.zeros((B, C), device="cuda").contiguous()
+        gu = torch.zeros((B, C), device="cuda").contiguous()
+        gk = torch.zeros((B, T, C), device="cuda").contiguous()
+        gv = torch.zeros((B, T, C), device="cuda").contiguous()
+        half_mode = w.dtype == torch.half
+        bf_mode = w.dtype == torch.bfloat16
+        wkv_cuda.backward(
+            B,
+            T,
+            C,
+            w.float().contiguous(),
+            u.float().contiguous(),
+            k.float().contiguous(),
+            v.float().contiguous(),
+            gy.float().contiguous(),
+            gw,
+            gu,
+            gk,
+            gv,
+        )
         if half_mode:
             gw = torch.sum(gw.half(), dim=0)
             gu = torch.sum(gu.half(), dim=0)
@@ -79,7 +101,15 @@ class WKV(torch.autograd.Function):
         elif bf_mode:
             gw = torch.sum(gw.bfloat16(), dim=0)
             gu = torch.sum(gu.bfloat16(), dim=0)
-            return (None, None, None, gw.bfloat16(), gu.bfloat16(), gk.bfloat16(), gv.bfloat16())
+            return (
+                None,
+                None,
+                None,
+                gw.bfloat16(),
+                gu.bfloat16(),
+                gk.bfloat16(),
+                gv.bfloat16(),
+            )
         else:
             gw = torch.sum(gw, dim=0)
             gu = torch.sum(gu, dim=0)
@@ -90,24 +120,43 @@ def RUN_CUDA(B, T, C, w, u, k, v):
     return WKV.apply(B, T, C, w.cuda(), u.cuda(), k.cuda(), v.cuda())
 
 
-def q_shift(input, shift_pixel=1, gamma=1/4, patch_resolution=None):
-    assert gamma <= 1/4
+def q_shift(input, shift_pixel=1, gamma=1 / 4, patch_resolution=None):
+    assert gamma <= 1 / 4
     B, N, C = input.shape
-    input = input.transpose(1, 2).reshape(B, C, patch_resolution[0], patch_resolution[1])
+    input = input.transpose(1, 2).reshape(
+        B, C, patch_resolution[0], patch_resolution[1]
+    )
     B, C, H, W = input.shape
     output = torch.zeros_like(input)
-    output[:, 0:int(C*gamma), :, shift_pixel:W] = input[:, 0:int(C*gamma), :, 0:W-shift_pixel]
-    output[:, int(C*gamma):int(C*gamma*2), :, 0:W-shift_pixel] = input[:, int(C*gamma):int(C*gamma*2), :, shift_pixel:W]
-    output[:, int(C*gamma*2):int(C*gamma*3), shift_pixel:H, :] = input[:, int(C*gamma*2):int(C*gamma*3), 0:H-shift_pixel, :]
-    output[:, int(C*gamma*3):int(C*gamma*4), 0:H-shift_pixel, :] = input[:, int(C*gamma*3):int(C*gamma*4), shift_pixel:H, :]
-    output[:, int(C*gamma*4):, ...] = input[:, int(C*gamma*4):, ...]
+    output[:, 0 : int(C * gamma), :, shift_pixel:W] = input[
+        :, 0 : int(C * gamma), :, 0 : W - shift_pixel
+    ]
+    output[:, int(C * gamma) : int(C * gamma * 2), :, 0 : W - shift_pixel] = input[
+        :, int(C * gamma) : int(C * gamma * 2), :, shift_pixel:W
+    ]
+    output[:, int(C * gamma * 2) : int(C * gamma * 3), shift_pixel:H, :] = input[
+        :, int(C * gamma * 2) : int(C * gamma * 3), 0 : H - shift_pixel, :
+    ]
+    output[:, int(C * gamma * 3) : int(C * gamma * 4), 0 : H - shift_pixel, :] = input[
+        :, int(C * gamma * 3) : int(C * gamma * 4), shift_pixel:H, :
+    ]
+    output[:, int(C * gamma * 4) :, ...] = input[:, int(C * gamma * 4) :, ...]
     return output.flatten(2).transpose(1, 2)
 
 
 class VRWKV_SpatialMix(BaseModule):
-    def __init__(self, n_embd, n_layer, layer_id, shift_mode='q_shift',
-                 channel_gamma=1/4, shift_pixel=1, init_mode='fancy', 
-                 key_norm=False, with_cp=False):
+    def __init__(
+        self,
+        n_embd,
+        n_layer,
+        layer_id,
+        shift_mode="q_shift",
+        channel_gamma=1 / 4,
+        shift_pixel=1,
+        init_mode="fancy",
+        key_norm=False,
+        with_cp=False,
+    ):
         super().__init__()
         self.layer_id = layer_id
         self.n_layer = n_layer
@@ -141,35 +190,45 @@ class VRWKV_SpatialMix(BaseModule):
         self.with_cp = with_cp
 
     def _init_weights(self, init_mode):
-        if init_mode=='fancy':
-            with torch.no_grad(): # fancy init
-                ratio_0_to_1 = (self.layer_id / (self.n_layer - 1)) # 0 to 1
-                ratio_1_to_almost0 = (1.0 - (self.layer_id / self.n_layer)) # 1 to ~0
-                
+        if init_mode == "fancy":
+            with torch.no_grad():  # fancy init
+                ratio_0_to_1 = self.layer_id / (self.n_layer - 1)  # 0 to 1
+                ratio_1_to_almost0 = 1.0 - (self.layer_id / self.n_layer)  # 1 to ~0
+
                 # fancy time_decay
                 decay_speed = torch.ones(self.n_embd)
                 for h in range(self.n_embd):
-                    decay_speed[h] = -5 + 8 * (h / (self.n_embd-1)) ** (0.7 + 1.3 * ratio_0_to_1)
+                    decay_speed[h] = -5 + 8 * (h / (self.n_embd - 1)) ** (
+                        0.7 + 1.3 * ratio_0_to_1
+                    )
                 self.spatial_decay = nn.Parameter(decay_speed)
 
                 # fancy time_first
-                zigzag = (torch.tensor([(i+1)%3 - 1 for i in range(self.n_embd)]) * 0.5)
-                self.spatial_first = nn.Parameter(torch.ones(self.n_embd) * math.log(0.3) + zigzag)
-                
+                zigzag = (
+                    torch.tensor([(i + 1) % 3 - 1 for i in range(self.n_embd)]) * 0.5
+                )
+                self.spatial_first = nn.Parameter(
+                    torch.ones(self.n_embd) * math.log(0.3) + zigzag
+                )
+
                 # fancy time_mix
                 x = torch.ones(1, 1, self.n_embd)
                 for i in range(self.n_embd):
                     x[0, 0, i] = i / self.n_embd
                 self.spatial_mix_k = nn.Parameter(torch.pow(x, ratio_1_to_almost0))
-                self.spatial_mix_v = nn.Parameter(torch.pow(x, ratio_1_to_almost0) + 0.3 * ratio_0_to_1)
-                self.spatial_mix_r = nn.Parameter(torch.pow(x, 0.5 * ratio_1_to_almost0))
-        elif init_mode=='local':
+                self.spatial_mix_v = nn.Parameter(
+                    torch.pow(x, ratio_1_to_almost0) + 0.3 * ratio_0_to_1
+                )
+                self.spatial_mix_r = nn.Parameter(
+                    torch.pow(x, 0.5 * ratio_1_to_almost0)
+                )
+        elif init_mode == "local":
             self.spatial_decay = nn.Parameter(torch.ones(self.n_embd))
             self.spatial_first = nn.Parameter(torch.ones(self.n_embd))
             self.spatial_mix_k = nn.Parameter(torch.ones([1, 1, self.n_embd]))
             self.spatial_mix_v = nn.Parameter(torch.ones([1, 1, self.n_embd]))
             self.spatial_mix_r = nn.Parameter(torch.ones([1, 1, self.n_embd]))
-        elif init_mode=='global':
+        elif init_mode == "global":
             self.spatial_decay = nn.Parameter(torch.zeros(self.n_embd))
             self.spatial_first = nn.Parameter(torch.zeros(self.n_embd))
             self.spatial_mix_k = nn.Parameter(torch.ones([1, 1, self.n_embd]) * 0.5)
@@ -182,7 +241,9 @@ class VRWKV_SpatialMix(BaseModule):
         # Mix x with the previous timestep to produce xk, xv, xr
         B, T, C = x.size()
         if self.shift_pixel > 0:
-            xx = self.shift_func(x, self.shift_pixel, self.channel_gamma, patch_resolution)
+            xx = self.shift_func(
+                x, self.shift_pixel, self.channel_gamma, patch_resolution
+            )
             xk = x * self.spatial_mix_k + xx * (1 - self.spatial_mix_k)
             xv = x * self.spatial_mix_v + xx * (1 - self.spatial_mix_v)
             xr = x * self.spatial_mix_r + xx * (1 - self.spatial_mix_r)
@@ -211,6 +272,7 @@ class VRWKV_SpatialMix(BaseModule):
             x = sr * x
             x = self.output(x)
             return x
+
         if self.with_cp and x.requires_grad:
             x = cp.checkpoint(_inner_forward, x)
         else:
@@ -219,9 +281,19 @@ class VRWKV_SpatialMix(BaseModule):
 
 
 class VRWKV_ChannelMix(BaseModule):
-    def __init__(self, n_embd, n_layer, layer_id, shift_mode='q_shift',
-                 channel_gamma=1/4, shift_pixel=1, hidden_rate=4, init_mode='fancy',
-                 key_norm=False, with_cp=False):
+    def __init__(
+        self,
+        n_embd,
+        n_layer,
+        layer_id,
+        shift_mode="q_shift",
+        channel_gamma=1 / 4,
+        shift_pixel=1,
+        hidden_rate=4,
+        init_mode="fancy",
+        key_norm=False,
+        with_cp=False,
+    ):
         super().__init__()
         self.layer_id = layer_id
         self.n_layer = n_layer
@@ -250,18 +322,18 @@ class VRWKV_ChannelMix(BaseModule):
         self.receptance.scale_init = 0
 
     def _init_weights(self, init_mode):
-        if init_mode == 'fancy':
-            with torch.no_grad(): # fancy init of time_mix
-                ratio_1_to_almost0 = (1.0 - (self.layer_id / self.n_layer)) # 1 to ~0
+        if init_mode == "fancy":
+            with torch.no_grad():  # fancy init of time_mix
+                ratio_1_to_almost0 = 1.0 - (self.layer_id / self.n_layer)  # 1 to ~0
                 x = torch.ones(1, 1, self.n_embd)
                 for i in range(self.n_embd):
                     x[0, 0, i] = i / self.n_embd
                 self.spatial_mix_k = nn.Parameter(torch.pow(x, ratio_1_to_almost0))
                 self.spatial_mix_r = nn.Parameter(torch.pow(x, ratio_1_to_almost0))
-        elif init_mode == 'local':
+        elif init_mode == "local":
             self.spatial_mix_k = nn.Parameter(torch.ones([1, 1, self.n_embd]))
             self.spatial_mix_r = nn.Parameter(torch.ones([1, 1, self.n_embd]))
-        elif init_mode == 'global':
+        elif init_mode == "global":
             self.spatial_mix_k = nn.Parameter(torch.ones([1, 1, self.n_embd]) * 0.5)
             self.spatial_mix_r = nn.Parameter(torch.ones([1, 1, self.n_embd]) * 0.5)
         else:
@@ -270,7 +342,9 @@ class VRWKV_ChannelMix(BaseModule):
     def forward(self, x, patch_resolution=None):
         def _inner_forward(x):
             if self.shift_pixel > 0:
-                xx = self.shift_func(x, self.shift_pixel, self.channel_gamma, patch_resolution)
+                xx = self.shift_func(
+                    x, self.shift_pixel, self.channel_gamma, patch_resolution
+                )
                 xk = x * self.spatial_mix_k + xx * (1 - self.spatial_mix_k)
                 xr = x * self.spatial_mix_r + xx * (1 - self.spatial_mix_r)
             else:
@@ -284,6 +358,7 @@ class VRWKV_ChannelMix(BaseModule):
             kv = self.value(k)
             x = torch.sigmoid(self.receptance(xr)) * kv
             return x
+
         if self.with_cp and x.requires_grad:
             x = cp.checkpoint(_inner_forward, x)
         else:
@@ -292,30 +367,61 @@ class VRWKV_ChannelMix(BaseModule):
 
 
 class Block(BaseModule):
-    def __init__(self, n_embd, n_layer, layer_id, shift_mode='q_shift',
-                 channel_gamma=1/4, shift_pixel=1, drop_path=0., hidden_rate=4,
-                 init_mode='fancy', init_values=None, post_norm=False, key_norm=False,
-                 with_cp=False):
+    def __init__(
+        self,
+        n_embd,
+        n_layer,
+        layer_id,
+        shift_mode="q_shift",
+        channel_gamma=1 / 4,
+        shift_pixel=1,
+        drop_path=0.0,
+        hidden_rate=4,
+        init_mode="fancy",
+        init_values=None,
+        post_norm=False,
+        key_norm=False,
+        with_cp=False,
+    ):
         super().__init__()
         self.layer_id = layer_id
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         if self.layer_id == 0:
             self.ln0 = nn.LayerNorm(n_embd)
 
-        self.att = VRWKV_SpatialMix(n_embd, n_layer, layer_id, shift_mode,
-                                   channel_gamma, shift_pixel, init_mode,
-                                   key_norm=key_norm)
+        self.att = VRWKV_SpatialMix(
+            n_embd,
+            n_layer,
+            layer_id,
+            shift_mode,
+            channel_gamma,
+            shift_pixel,
+            init_mode,
+            key_norm=key_norm,
+        )
 
-        self.ffn = VRWKV_ChannelMix(n_embd, n_layer, layer_id, shift_mode,
-                                   channel_gamma, shift_pixel, hidden_rate,
-                                   init_mode, key_norm=key_norm)
-        self.layer_scale = (init_values is not None)
+        self.ffn = VRWKV_ChannelMix(
+            n_embd,
+            n_layer,
+            layer_id,
+            shift_mode,
+            channel_gamma,
+            shift_pixel,
+            hidden_rate,
+            init_mode,
+            key_norm=key_norm,
+        )
+        self.layer_scale = init_values is not None
         self.post_norm = post_norm
         if self.layer_scale:
-            self.gamma1 = nn.Parameter(init_values * torch.ones((n_embd)), requires_grad=True)
-            self.gamma2 = nn.Parameter(init_values * torch.ones((n_embd)), requires_grad=True)
+            self.gamma1 = nn.Parameter(
+                init_values * torch.ones((n_embd)), requires_grad=True
+            )
+            self.gamma2 = nn.Parameter(
+                init_values * torch.ones((n_embd)), requires_grad=True
+            )
         self.with_cp = with_cp
 
     def forward(self, x, patch_resolution=None):
@@ -324,19 +430,28 @@ class Block(BaseModule):
                 x = self.ln0(x)
             if self.post_norm:
                 if self.layer_scale:
-                    x = x + self.drop_path(self.gamma1 * self.ln1(self.att(x, patch_resolution)))
-                    x = x + self.drop_path(self.gamma2 * self.ln2(self.ffn(x, patch_resolution)))
+                    x = x + self.drop_path(
+                        self.gamma1 * self.ln1(self.att(x, patch_resolution))
+                    )
+                    x = x + self.drop_path(
+                        self.gamma2 * self.ln2(self.ffn(x, patch_resolution))
+                    )
                 else:
                     x = x + self.drop_path(self.ln1(self.att(x, patch_resolution)))
                     x = x + self.drop_path(self.ln2(self.ffn(x, patch_resolution)))
             else:
                 if self.layer_scale:
-                    x = x + self.drop_path(self.gamma1 * self.att(self.ln1(x), patch_resolution))
-                    x = x + self.drop_path(self.gamma2 * self.ffn(self.ln2(x), patch_resolution))
+                    x = x + self.drop_path(
+                        self.gamma1 * self.att(self.ln1(x), patch_resolution)
+                    )
+                    x = x + self.drop_path(
+                        self.gamma2 * self.ffn(self.ln2(x), patch_resolution)
+                    )
                 else:
                     x = x + self.drop_path(self.att(self.ln1(x), patch_resolution))
                     x = x + self.drop_path(self.ffn(self.ln2(x), patch_resolution))
             return x
+
         if self.with_cp and x.requires_grad:
             x = cp.checkpoint(_inner_forward, x)
         else:
@@ -346,27 +461,29 @@ class Block(BaseModule):
 
 @BACKBONES.register_module()
 class VRWKV(BaseBackbone):
-    def __init__(self,
-                 img_size=224,
-                 patch_size=16,
-                 in_channels=3,
-                 out_indices=-1,
-                 drop_rate=0.,
-                 embed_dims=256,
-                 depth=12,
-                 drop_path_rate=0.,
-                 channel_gamma=1/4,
-                 shift_pixel=1,
-                 shift_mode='q_shift',
-                 init_mode='fancy',
-                 post_norm=False,
-                 key_norm=False,
-                 init_values=None,
-                 hidden_rate=4,
-                 final_norm=True,
-                 interpolate_mode='bicubic',
-                 with_cp=False,
-                 init_cfg=None):
+    def __init__(
+        self,
+        img_size=224,
+        patch_size=16,
+        in_channels=3,
+        out_indices=-1,
+        drop_rate=0.0,
+        embed_dims=256,
+        depth=12,
+        drop_path_rate=0.0,
+        channel_gamma=1 / 4,
+        shift_pixel=1,
+        shift_mode="q_shift",
+        init_mode="fancy",
+        post_norm=False,
+        key_norm=False,
+        init_values=None,
+        hidden_rate=4,
+        final_norm=True,
+        interpolate_mode="bicubic",
+        with_cp=False,
+        init_cfg=None,
+    ):
         super().__init__(init_cfg)
         self.embed_dims = embed_dims
         self.num_extra_tokens = 0
@@ -377,55 +494,58 @@ class VRWKV(BaseBackbone):
             in_channels=in_channels,
             input_size=img_size,
             embed_dims=self.embed_dims,
-            conv_type='Conv2d',
+            conv_type="Conv2d",
             kernel_size=patch_size,
             stride=patch_size,
-            bias=True)
-        
+            bias=True,
+        )
+
         self.patch_resolution = self.patch_embed.init_out_size
         num_patches = self.patch_resolution[0] * self.patch_resolution[1]
 
         # Set position embedding
         self.interpolate_mode = interpolate_mode
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, num_patches, self.embed_dims))
-        
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, self.embed_dims))
+
         self.drop_after_pos = nn.Dropout(p=drop_rate)
 
         if isinstance(out_indices, int):
             out_indices = [out_indices]
-        assert isinstance(out_indices, Sequence), \
-            f'"out_indices" must by a sequence or int, ' \
-            f'get {type(out_indices)} instead.'
+        assert isinstance(out_indices, Sequence), (
+            f'"out_indices" must by a sequence or int, '
+            f"get {type(out_indices)} instead."
+        )
         for i, index in enumerate(out_indices):
             if index < 0:
                 out_indices[i] = self.num_layers + index
-            assert 0 <= out_indices[i] <= self.num_layers, \
-                f'Invalid out_indices {index}'
+            assert (
+                0 <= out_indices[i] <= self.num_layers
+            ), f"Invalid out_indices {index}"
         self.out_indices = out_indices
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
         self.layers = ModuleList()
         for i in range(self.num_layers):
-            self.layers.append(Block(
-                n_embd=embed_dims,
-                n_layer=depth,
-                layer_id=i,
-                channel_gamma=channel_gamma,
-                shift_pixel=shift_pixel,
-                shift_mode=shift_mode,
-                hidden_rate=hidden_rate,
-                drop_path=dpr[i],
-                init_mode=init_mode,
-                post_norm=post_norm,
-                key_norm=key_norm,
-                init_values=init_values,
-                with_cp=with_cp
-            ))
+            self.layers.append(
+                Block(
+                    n_embd=embed_dims,
+                    n_layer=depth,
+                    layer_id=i,
+                    channel_gamma=channel_gamma,
+                    shift_pixel=shift_pixel,
+                    shift_mode=shift_mode,
+                    hidden_rate=hidden_rate,
+                    drop_path=dpr[i],
+                    init_mode=init_mode,
+                    post_norm=post_norm,
+                    key_norm=key_norm,
+                    init_values=init_values,
+                    with_cp=with_cp,
+                )
+            )
 
         self.final_norm = final_norm
         if final_norm:
             self.ln1 = nn.LayerNorm(self.embed_dims)
-
 
     def forward(self, x):
         B = x.shape[0]
@@ -436,8 +556,9 @@ class VRWKV(BaseBackbone):
             self.patch_resolution,
             patch_resolution,
             mode=self.interpolate_mode,
-            num_extra_tokens=self.num_extra_tokens)
-        
+            num_extra_tokens=self.num_extra_tokens,
+        )
+
         x = self.drop_after_pos(x)
 
         outs = []
@@ -455,3 +576,7 @@ class VRWKV(BaseBackbone):
                 out = patch_token
                 outs.append(out)
         return tuple(outs)
+
+
+if __name__ == "__main__":
+    pass
